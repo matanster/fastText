@@ -26,6 +26,10 @@ void Matrix::zero() {
   std::fill(data_.begin(), data_.end(), 0.0);
 }
 
+//
+// random matrix initialization ―
+// each cell is i.i.d initialized at random from a uniform distribution in the range (-a, a)
+//
 void Matrix::uniform(real a) {
   std::minstd_rand rng(1);
   std::uniform_real_distribution<> uniform(-a, a);

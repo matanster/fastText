@@ -322,6 +322,10 @@ void FastText::quantize(const Args qargs) {
   }
 }
 
+//
+// the classification model's updating is applied here ―
+// for a single training data sentence passed to it by the caller
+//
 void FastText::supervised(
     Model& model,
     real lr,
@@ -329,8 +333,8 @@ void FastText::supervised(
     const std::vector<int32_t>& labels) {
   if (labels.size() == 0 || line.size() == 0) return;
   std::uniform_int_distribution<> uniform(0, labels.size() - 1);
-  int32_t i = uniform(model.rng);
-  model.update(line, labels[i], lr);
+  int32_t i = uniform(model.rng);  // chooses which class to apply the error by (only relevant to mulit-class classification)
+  model.update(line, labels[i], lr); // kicks off a forward and backward pass over the network, for the given training line
 }
 
 void FastText::cbow(Model& model, real lr,
@@ -391,6 +395,9 @@ std::tuple<int64_t, double, double> FastText::test(
       nexamples, precision / npredictions, precision / nlabels);
 }
 
+//
+// obtain a prediction for the input sentence
+//
 void FastText::predict(
   std::istream& in,
   int32_t k,
@@ -399,7 +406,7 @@ void FastText::predict(
 ) const {
   std::vector<int32_t> words, labels;
   predictions.clear();
-  dict_->getLine(in, words, labels);
+  dict_->getLine(in, words, labels); // tokenizes the line, and gets pointers to all its ngrams into a vector
   predictions.clear();
   if (words.empty()) return;
   Vector hidden(args_->dim);
@@ -565,15 +572,20 @@ void FastText::analogies(int32_t k) {
   }
 }
 
+//
+// a thread training the model, can be instantiated many times in parallel due to HOGWILD (https://arxiv.org/abs/1106.5730)
+//
 void FastText::trainThread(int32_t threadId) {
+
   std::ifstream ifs(args_->input);
-  utils::seek(ifs, threadId * utils::size(ifs) / args_->thread);
+
+  utils::seek(ifs, threadId * utils::size(ifs) / args_->thread); // each thread (threadId) trains on a separate part of the training data!
 
   Model model(input_, output_, args_, threadId);
   if (args_->model == model_name::sup) {
-    model.setTargetCounts(dict_->getCounts(entry_type::label));
+    model.setTargetCounts(dict_->getCounts(entry_type::label)); // initialize by the number of classes in the training data
   } else {
-    model.setTargetCounts(dict_->getCounts(entry_type::word));
+    model.setTargetCounts(dict_->getCounts(entry_type::word)); // not relevant to the classification model
   }
 
   const int64_t ntokens = dict_->ntokens();
@@ -581,11 +593,16 @@ void FastText::trainThread(int32_t threadId) {
   std::vector<int32_t> line, labels;
   while (tokenCount_ < args_->epoch * ntokens) {
     real progress = real(tokenCount_) / (args_->epoch * ntokens);
-    real lr = args_->lr * (1.0 - progress);
+    real lr = args_->lr * (1.0 - progress); // linearly decaying learning rate
+
+    // the classification model's updating happens through here
     if (args_->model == model_name::sup) {
       localTokenCount += dict_->getLine(ifs, line, labels);
       supervised(model, lr, line, labels);
-    } else if (args_->model == model_name::cbow) {
+    }
+
+    // the word embedding model's updating happens here, if we're invoked for it..
+    else if (args_->model == model_name::cbow) {
       localTokenCount += dict_->getLine(ifs, line, model.rng);
       cbow(model, lr, line);
     } else if (args_->model == model_name::sg) {
@@ -596,18 +613,24 @@ void FastText::trainThread(int32_t threadId) {
       tokenCount_ += localTokenCount;
       localTokenCount = 0;
       if (threadId == 0 && args_->verbose > 1)
-        loss_ = model.getLoss();
+        loss_ = model.getLoss(); // just for progress logging
     }
   }
+
+  // when training is done, only one thread turns off the lights (closes the input file)
   if (threadId == 0)
     loss_ = model.getLoss();
   ifs.close();
 }
 
+//
+// loads a word embedding from file.
+// the embedding is stuffed into a `Dictionary` object.
+//
 void FastText::loadVectors(std::string filename) {
   std::ifstream in(filename);
   std::vector<std::string> words;
-  std::shared_ptr<Matrix> mat; // temp. matrix for pretrained vectors
+  std::shared_ptr<Matrix> mat;
   int64_t n, dim;
   if (!in.is_open()) {
     throw std::invalid_argument(filename + " cannot be opened for loading!");
@@ -644,11 +667,14 @@ void FastText::loadVectors(std::string filename) {
   }
 }
 
+//
+// the overall training process starts here:
+// some initializations, then kicks off the training process
+//
 void FastText::train(const Args args) {
   args_ = std::make_shared<Args>(args);
   dict_ = std::make_shared<Dictionary>(args_);
   if (args_->input == "-") {
-    // manage expectations
     throw std::invalid_argument("Cannot use stdin for training!");
   }
   std::ifstream ifs(args_->input);
@@ -666,13 +692,16 @@ void FastText::train(const Args args) {
     input_->uniform(1.0 / args_->dim);
   }
 
+  // initialize the output weights matrix, it's dimensions being | classes | , dimension of word vectors of pre-trained word embedding
   if (args_->model == model_name::sup) {
     output_ = std::make_shared<Matrix>(dict_->nlabels(), args_->dim);
   } else {
     output_ = std::make_shared<Matrix>(dict_->nwords(), args_->dim);
   }
   output_->zero();
-  startThreads();
+
+  startThreads(); // kicks off the training process
+
   model_ = std::make_shared<Model>(input_, output_, args_, 0);
   if (args_->model == model_name::sup) {
     model_->setTargetCounts(dict_->getCounts(entry_type::label));
@@ -681,6 +710,10 @@ void FastText::train(const Args args) {
   }
 }
 
+//
+// starts the training threads, and also waits for them to finish.
+// also logs progress per the chosen verbosity level
+//
 void FastText::startThreads() {
   start_ = clock();
   tokenCount_ = 0;
@@ -689,8 +722,8 @@ void FastText::startThreads() {
   for (int32_t i = 0; i < args_->thread; i++) {
     threads.push_back(std::thread([=]() { trainThread(i); }));
   }
+
   const int64_t ntokens = dict_->ntokens();
-  // Same condition as trainThread
   while (tokenCount_ < args_->epoch * ntokens) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (loss_ >= 0 && args_->verbose > 1) {
@@ -699,6 +732,7 @@ void FastText::startThreads() {
       printInfo(progress, loss_, std::cerr);
     }
   }
+
   for (int32_t i = 0; i < args_->thread; i++) {
     threads[i].join();
   }

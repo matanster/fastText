@@ -53,6 +53,9 @@ void Vector::addVector(const Vector& source, real s) {
   }
 }
 
+//
+// adds the i'th column from matrix A, to the vector implementation of self
+//
 void Vector::addRow(const Matrix& A, int64_t i) {
   assert(i >= 0);
   assert(i < A.size(0));
@@ -62,6 +65,9 @@ void Vector::addRow(const Matrix& A, int64_t i) {
   }
 }
 
+//
+// adds the i'th column from matrix A, multiplied by a, to the vector implementation of self 
+//
 void Vector::addRow(const Matrix& A, int64_t i, real a) {
   assert(i >= 0);
   assert(i < A.size(0));

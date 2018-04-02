@@ -89,12 +89,17 @@ real Model::hierarchicalSoftmax(int32_t target, real lr) {
   return loss;
 }
 
+//
+// computes the output layer and applies the softmax to it (using the numerically stable softmax mini-algo)
+//
 void Model::computeOutputSoftmax(Vector& hidden, Vector& output) const {
   if (quant_ && args_->qout) {
-    output.mul(*qwo_, hidden);
+    output.mul(*qwo_, hidden); // not relevant - only relevant for quantized (compressed) models
   } else {
+    // compute the output layer by multiplying the "output weights matrix" with the hidden layer
     output.mul(*wo_, hidden);
   }
+  // apply softmax
   real max = output[0], z = 0.0;
   for (int32_t i = 0; i < osz_; i++) {
     max = std::max(output[i], max);
@@ -112,6 +117,10 @@ void Model::computeOutputSoftmax() {
   computeOutputSoftmax(hidden_, output_);
 }
 
+//
+// computes the output layer, then computes the error,
+// and applies the gradient to the output weight matrix
+//
 real Model::softmax(int32_t target, real lr) {
   grad_.zero();
   computeOutputSoftmax();
@@ -124,14 +133,25 @@ real Model::softmax(int32_t target, real lr) {
   return -log(output_[target]);
 }
 
+//
+// calculates the hidden layer (forward network pass) for the provided input ngrams.
+// the hidden layer is calculated as follows:
+//
+//   1. sum the embedding vectors of all input ngrams into the (zero initialized) hidden layer
+//   2. normalize by the number of input ngrams
+//
+// as you see, the input weights matrix is only used on a lookup basis here, rather than being used through direct multiplication.
+// this is because multiplying it with a vector the length of the ngrams dictionary, where very few cells are not zero,
+// is exactly the same as doing the lookup-based loop below, only much more efficient.
+//
 void Model::computeHidden(const std::vector<int32_t>& input, Vector& hidden) const {
   assert(hidden.size() == hsz_);
   hidden.zero();
   for (auto it = input.cbegin(); it != input.cend(); ++it) {
     if(quant_) {
-      hidden.addRow(*qwi_, *it);
+      hidden.addRow(*qwi_, *it); // not relevant - only relevant for quantized (compressed) models
     } else {
-      hidden.addRow(*wi_, *it);
+      hidden.addRow(*wi_, *it); // adds column `it` of matrix `wi` into the hidden layer
     }
   }
   hidden.mul(1.0 / input.size());
@@ -142,9 +162,19 @@ bool Model::comparePairs(const std::pair<real, int32_t> &l,
   return l.first > r.first;
 }
 
-void Model::predict(const std::vector<int32_t>& input, int32_t k, real threshold,
-                    std::vector<std::pair<real, int32_t>>& heap,
-                    Vector& hidden, Vector& output) const {
+//
+// predicts from the model, returning the `k` top-scoring classes that pass the given confidence `threshold`.
+// receives as input dictionary indices, for all ngrams implied in the input sentence
+//
+void Model::predict(
+  const std::vector<int32_t>& input,
+  int32_t k,
+  real threshold,
+  std::vector<std::pair<real,
+  int32_t>>& heap,
+  Vector& hidden,
+  Vector& output
+) const {
   if (k <= 0) {
     throw std::invalid_argument("k needs to be 1 or higher!");
   }
@@ -154,13 +184,18 @@ void Model::predict(const std::vector<int32_t>& input, int32_t k, real threshold
   heap.reserve(k + 1);
   computeHidden(input, hidden);
   if (args_->loss == loss_name::hs) {
+    // find top-scoring classes, for a hierarchical softmax trained model
     dfs(k, threshold, 2 * osz_ - 2, 0.0, heap, hidden);
   } else {
+    // find top-scoring classes, for a softmax trained model
     findKBest(k, threshold, heap, hidden, output);
   }
   std::sort_heap(heap.begin(), heap.end(), comparePairs);
 }
 
+//
+// prediction function, calling the other `Model::predict` for the actual work..
+//
 void Model::predict(
   const std::vector<int32_t>& input,
   int32_t k,
@@ -221,23 +256,29 @@ void Model::dfs(int32_t k, real threshold, int32_t node, real score,
   dfs(k, threshold, tree[node].right, score + std_log(f), heap, hidden);
 }
 
+//
+// a single Stochastic Gradient Descent step, acting on a single training data item
+//
 void Model::update(const std::vector<int32_t>& input, int32_t target, real lr) {
   assert(target >= 0);
   assert(target < osz_);
   if (input.size() == 0) return;
-  computeHidden(input, hidden_);
+  computeHidden(input, hidden_); // perform the network's forward pass, while applying the gradient to the output matrix
   if (args_->loss == loss_name::ns) {
     loss_ += negativeSampling(target, lr);
   } else if (args_->loss == loss_name::hs) {
     loss_ += hierarchicalSoftmax(target, lr);
   } else {
-    loss_ += softmax(target, lr);
+    loss_ += softmax(target, lr); // with the classification mode/model, we arrive here (unless hierarchical softmax was explicitly chosen)
   }
   nexamples_ += 1;
 
+  // for the classification model (but not the word embedding model), adjust the gradient to the sentence length
   if (args_->model == model_name::sup) {
     grad_.mul(1.0 / input.size());
   }
+
+  // apply the gradient to the input weight matrix (it is applied to the output weight matrix earlier already)
   for (auto it = input.cbegin(); it != input.cend(); ++it) {
     wi_->addRow(grad_, *it, 1.0);
   }

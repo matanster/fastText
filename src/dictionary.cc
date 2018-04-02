@@ -198,6 +198,9 @@ void Dictionary::initNgrams() {
   }
 }
 
+//
+// read the next word from the input stream, words separated only by spaces and such...
+//
 bool Dictionary::readWord(std::istream& in, std::string& word) const
 {
   int c;
@@ -349,6 +352,9 @@ int32_t Dictionary::getLine(std::istream& in,
   return ntokens;
 }
 
+//
+// builds up a features list from the input line (and labels list as well, if a training data line)
+//
 int32_t Dictionary::getLine(std::istream& in,
                             std::vector<int32_t>& words,
                             std::vector<int32_t>& labels) const {
@@ -373,6 +379,9 @@ int32_t Dictionary::getLine(std::istream& in,
     }
     if (token == EOS) break;
   }
+
+  // complete the features list with the ngram combinations of the tokens of the line,
+  // if word n-grams are to be included as features, and not only single words
   addWordNgrams(words, word_hashes, args_->wordNgrams);
   return ntokens;
 }
